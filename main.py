@@ -33,49 +33,67 @@ scheduler = AsyncIOScheduler(timezone=msk_tz)
 scheduled_jobs = {}
 
 async def process_single_video(file_path: str, file_name: str, job_id: str):
-    """Срабатывает строго в назначенное время: публикует в канал и удаляет с Диска."""
+    """Срабатывает в назначенное время: скачивает, публикует (с повторами) и только при успехе удаляет."""
     logger.info(f"⏳ Время публикации! Начинаю обработку: {file_name}")
     
     local_path = os.path.join(tempfile.gettempdir(), file_name)
+    send_success = False
+    
+    # Настройки повторов
+    MAX_RETRIES = 4      # Количество попыток
+    RETRY_DELAY = 30     # Пауза между попытками в секундах
     
     try:
         job_data = scheduled_jobs.pop(job_id, None)
         
         async with yadisk.AsyncClient(token=YADISK_TOKEN) as disk:
-            # 1. Отправка в канал
-            if job_data and 'file_id' in job_data:
-                # ОПТИМИЗАЦИЯ: Видео уже загружено в Telegram, отправляем по file_id мгновенно
-                logger.info(f"Использую закэшированный file_id для отправки {file_name}")
-                await bot.send_animation(chat_id=TARGET_CHAT_ID, animation=job_data['file_id'])
+            # 1. Скачивание с Диска перед публикацией
+            logger.info(f"Скачивание {file_name} на сервер для публикации...")
+            await disk.download(file_path, local_path)
+            
+            # 2. Попытка отправить в канал (с циклом повторов)
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    # FSInputFile лучше инициализировать внутри цикла при каждой попытке
+                    video = FSInputFile(local_path)
+                    await bot.send_animation(chat_id=TARGET_CHAT_ID, animation=video)
+                    send_success = True
+                    break  # Если отправка успешна, прерываем цикл и идем дальше
+                    
+                except Exception as tg_error:
+                    logger.error(f"❌ Ошибка загрузки {file_name} в Telegram (попытка {attempt}/{MAX_RETRIES}): {tg_error}")
+                    if attempt < MAX_RETRIES:
+                        logger.info(f"⏳ Ожидание {RETRY_DELAY} секунд перед следующей попыткой...")
+                        await asyncio.sleep(RETRY_DELAY)
+            
+            # 3. Удаление с Диска ТОЛЬКО при успешной отправке
+            if send_success:
+                try:
+                    await disk.remove(file_path)
+                    logger.info(f"✅ Успешно: {file_name} опубликован и удален с Диска.")
+                except Exception as disk_error:
+                    logger.error(f"⚠️ Ошибка удаления с Диска, но видео опубликовано: {disk_error}")
             else:
-                # Резервный вариант, если скрипт перезапускался и потерял кэш
-                logger.info(f"Скачивание {file_name} на VPS (резервный метод)...")
-                await disk.download(file_path, local_path)
-                video = FSInputFile(local_path)
-                await bot.send_animation(chat_id=TARGET_CHAT_ID, animation=video)
+                logger.warning(f"⚠️ Файл {file_name} НЕ удален с Диска, так как все {MAX_RETRIES} попытки публикации провалились.")
             
-            # 2. Удаление с Диска
-            await disk.remove(file_path)
-            
-            # 3. Обновление статуса в личных сообщениях
+            # 4. Обновление статуса в личных сообщениях
             if job_data:
                 try:
-                    # ИЗМЕНЕНО: теперь редактируем caption (подпись к видео)
+                    status_emoji = "✅ <b>Опубликовано:</b>" if send_success else f"❌ <b>Ошибка публикации (после {MAX_RETRIES} попыток):</b>"
                     await bot.edit_message_caption(
                         chat_id=ADMIN_ID,
                         message_id=job_data['message_id'],
-                        caption=f"✅ <b>Опубликовано:</b> {file_name}",
+                        caption=f"{status_emoji} {file_name}",
                         parse_mode="HTML"
                     )
                 except Exception as e:
                     logger.error(f"Не удалось обновить админ-сообщение: {e}")
-                    
-            logger.info(f"✅ Успешно: {file_name} опубликован и удален с Диска.")
             
     except Exception as e:
-        logger.error(f"❌ Ошибка при публикации {file_name}: {e}", exc_info=True)
+        logger.error(f"❌ Общая ошибка при обработке {file_name}: {e}", exc_info=True)
         
     finally:
+        # Очистка временного файла на сервере
         if os.path.exists(local_path):
             os.remove(local_path)
 
@@ -103,7 +121,6 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
     local_path = os.path.join(tempfile.gettempdir(), selected.name)
 
     try:
-        # Скачиваем файл временно, чтобы отправить админу
         logger.info(f"Скачивание {selected.name} для уведомления админа...")
         await disk.download(selected.path, local_path)
         video_file = FSInputFile(local_path)
@@ -112,7 +129,6 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
             [InlineKeyboardButton(text="🗑 Удалить и заменить", callback_data=f"replace_{job_id}")]
         ])
         
-        # ИЗМЕНЕНО: Отправляем само видео с подписью
         msg = await bot.send_animation(
             chat_id=ADMIN_ID,
             animation=video_file,
@@ -122,13 +138,12 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
             parse_mode="HTML"
         )
         
-        # Сохраняем состояние, ВКЛЮЧАЯ file_id от Telegram
+        # Сохраняем состояние (убрали file_id за ненадобностью)
         scheduled_jobs[job_id] = {
             'file_path': selected.path,
             'file_name': selected.name,
             'run_date': run_date,
-            'message_id': msg.message_id,
-            'file_id': msg.animation.file_id # Сохраняем ID видео на серверах TG
+            'message_id': msg.message_id
         }
 
         scheduler.add_job(
@@ -145,7 +160,6 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
         return False
         
     finally:
-        # Удаляем локальный файл в любом случае
         if os.path.exists(local_path):
             os.remove(local_path)
 
@@ -196,7 +210,6 @@ async def handle_replace_video(callback: CallbackQuery):
         except Exception as e:
             logger.error(f"Ошибка удаления файла при замене: {e}")
             
-        # ИЗМЕНЕНО: Редактируем подпись к видео (текст кнопки пропадает)
         await callback.message.edit_caption(
             caption=f"❌ <b>Забраковано и удалено:</b> <code>{job_data['file_name']}</code>", 
             parse_mode="HTML"
