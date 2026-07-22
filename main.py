@@ -46,13 +46,13 @@ async def process_single_video(file_path: str, file_name: str, job_id: str):
             if job_data and 'file_id' in job_data:
                 # ОПТИМИЗАЦИЯ: Видео уже загружено в Telegram, отправляем по file_id мгновенно
                 logger.info(f"Использую закэшированный file_id для отправки {file_name}")
-                await bot.send_video(chat_id=TARGET_CHAT_ID, video=job_data['file_id'])
+                await bot.send_animation(chat_id=TARGET_CHAT_ID, animation=job_data['file_id'])
             else:
                 # Резервный вариант, если скрипт перезапускался и потерял кэш
                 logger.info(f"Скачивание {file_name} на VPS (резервный метод)...")
                 await disk.download(file_path, local_path)
                 video = FSInputFile(local_path)
-                await bot.send_video(chat_id=TARGET_CHAT_ID, video=video)
+                await bot.send_animation(chat_id=TARGET_CHAT_ID, animation=video)
             
             # 2. Удаление с Диска
             await disk.remove(file_path)
@@ -113,9 +113,9 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
         ])
         
         # ИЗМЕНЕНО: Отправляем само видео с подписью
-        msg = await bot.send_video(
+        msg = await bot.send_animation(
             chat_id=ADMIN_ID,
-            video=video_file,
+            animation=video_file,
             caption=f"🕒 <b>Запланировано видео:</b> <code>{selected.name}</code>\n"
                     f"📅 <b>Время (МСК):</b> {run_date.strftime('%Y-%m-%d %H:%M:%S')}",
             reply_markup=kb,
@@ -128,7 +128,7 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
             'file_name': selected.name,
             'run_date': run_date,
             'message_id': msg.message_id,
-            'file_id': msg.video.file_id  # Сохраняем ID видео на серверах TG
+            'file_id': msg.animation.file_id # Сохраняем ID видео на серверах TG
         }
 
         scheduler.add_job(
