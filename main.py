@@ -119,10 +119,12 @@ async def main():
     scheduler.add_job(fetch_and_schedule_videos, 'cron', hour=10, minute=0)
     scheduler.start()
     
-    logger.info("Планировщик запущен. Бот начинает polling (цикл событий открыт).")
+    # ---> ДОБАВЛЯЕМ ПРИНУДИТЕЛЬНЫЙ ЗАПУСК СРАЗУ ПРИ СТАРТЕ <---
+    logger.info("Принудительный запуск первой итерации задачи...")
+    # Оборачиваем в create_task, чтобы не заблокировать запуск бота
+    asyncio.create_task(fetch_and_schedule_videos())
     
-    # Чтобы скрипт не завершался и держал event-loop открытым,
-    # запускаем polling бота. Заодно бот сможет получать апдейты, если потребуется расширение логики.
+    logger.info("Планировщик запущен. Бот начинает polling (цикл событий открыт).")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
