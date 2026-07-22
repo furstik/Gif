@@ -32,7 +32,7 @@ scheduler = AsyncIOScheduler(timezone=msk_tz)
 # Словарь для хранения состояний
 scheduled_jobs = {}
 
-async def process_single_video(file_path: str, file_name: str, job_id: str):
+async def process_single_gif(file_path: str, file_name: str, job_id: str):
     """Срабатывает в назначенное время: скачивает, публикует (с повторами) и только при успехе удаляет."""
     logger.info(f"⏳ Время публикации! Начинаю обработку: {file_name}")
     
@@ -55,8 +55,8 @@ async def process_single_video(file_path: str, file_name: str, job_id: str):
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
                     # FSInputFile лучше инициализировать внутри цикла при каждой попытке
-                    video = FSInputFile(local_path)
-                    await bot.send_animation(chat_id=TARGET_CHAT_ID, animation=video)
+                    gif_file = FSInputFile(local_path)
+                    await bot.send_animation(chat_id=TARGET_CHAT_ID, animation=gif_file)
                     send_success = True
                     break  # Если отправка успешна, прерываем цикл и идем дальше
                     
@@ -70,16 +70,16 @@ async def process_single_video(file_path: str, file_name: str, job_id: str):
             if send_success:
                 try:
                     await disk.remove(file_path)
-                    logger.info(f"✅ Успешно: {file_name} опубликован и удален с Диска.")
+                    logger.info(f"✅ Успешно: {file_name} опубликована и удалена с Диска.")
                 except Exception as disk_error:
-                    logger.error(f"⚠️ Ошибка удаления с Диска, но видео опубликовано: {disk_error}")
+                    logger.error(f"⚠️ Ошибка удаления с Диска, но гиф опубликована: {disk_error}")
             else:
                 logger.warning(f"⚠️ Файл {file_name} НЕ удален с Диска, так как все {MAX_RETRIES} попытки публикации провалились.")
             
             # 4. Обновление статуса в личных сообщениях
             if job_data:
                 try:
-                    status_emoji = "✅ <b>Опубликовано:</b>" if send_success else f"❌ <b>Ошибка публикации (после {MAX_RETRIES} попыток):</b>"
+                    status_emoji = "✅ <b>Опубликована:</b>" if send_success else f"❌ <b>Ошибка публикации (после {MAX_RETRIES} попыток):</b>"
                     await bot.edit_message_caption(
                         chat_id=ADMIN_ID,
                         message_id=job_data['message_id'],
@@ -97,8 +97,8 @@ async def process_single_video(file_path: str, file_name: str, job_id: str):
         if os.path.exists(local_path):
             os.remove(local_path)
 
-async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) -> bool:
-    """Выбирает видео, показывает его админу и ставит в расписание."""
+async def assign_and_notify_gif(run_date: datetime, disk: yadisk.AsyncClient) -> bool:
+    """Выбирает гиф, показывает её админу и ставит в расписание."""
     target_folder = "/AutoPost_Queue/"
     
     try:
@@ -123,7 +123,7 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
     try:
         logger.info(f"Скачивание {selected.name} для уведомления админа...")
         await disk.download(selected.path, local_path)
-        video_file = FSInputFile(local_path)
+        gif_file = FSInputFile(local_path)
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🗑 Удалить и заменить", callback_data=f"replace_{job_id}")]
@@ -131,8 +131,8 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
         
         msg = await bot.send_animation(
             chat_id=ADMIN_ID,
-            animation=video_file,
-            caption=f"🕒 <b>Запланировано видео:</b> <code>{selected.name}</code>\n"
+            animation=gif_file,
+            caption=f"🕒 <b>Запланирована гиф:</b> <code>{selected.name}</code>\n"
                     f"📅 <b>Время (МСК):</b> {run_date.strftime('%Y-%m-%d %H:%M:%S')}",
             reply_markup=kb,
             parse_mode="HTML"
@@ -147,7 +147,7 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
         }
 
         scheduler.add_job(
-            process_single_video, 
+            process_single_gif, 
             trigger='date', 
             run_date=run_date, 
             args=[selected.path, selected.name, job_id],
@@ -163,14 +163,16 @@ async def assign_and_notify_video(run_date: datetime, disk: yadisk.AsyncClient) 
         if os.path.exists(local_path):
             os.remove(local_path)
 
-async def fetch_and_schedule_videos():
+async def fetch_and_schedule_gifs():
     """Ежедневная задача (в 10:00)."""
-    logger.info("Запуск распределения видео на следующий день...")
+    logger.info("Запуск распределения 3 гифок на следующий день...")
     now_msk = datetime.now(msk_tz)
     tomorrow_msk = now_msk + timedelta(days=1)
     
+    # Расписание: 14:00, 16:00, 18:00
     schedule_times = [
         tomorrow_msk.replace(hour=14, minute=0, second=0, microsecond=0),
+        tomorrow_msk.replace(hour=16, minute=0, second=0, microsecond=0),
         tomorrow_msk.replace(hour=18, minute=0, second=0, microsecond=0)
     ]
     
@@ -180,16 +182,16 @@ async def fetch_and_schedule_videos():
             return
 
         for run_date in schedule_times:
-            success = await assign_and_notify_video(run_date, disk)
+            success = await assign_and_notify_gif(run_date, disk)
             if not success:
                 try:
-                    await bot.send_message(ADMIN_ID, f"⚠️ Не хватило видео для слота на {run_date.strftime('%H:%M')}!")
+                    await bot.send_message(ADMIN_ID, f"⚠️ Не хватило гифок для слота на {run_date.strftime('%H:%M')}!")
                 except:
                     pass
 
 # --- ОБРАБОТЧИК КНОПКИ ---
 @dp.callback_query(F.data.startswith('replace_'))
-async def handle_replace_video(callback: CallbackQuery):
+async def handle_replace_gif(callback: CallbackQuery):
     job_id = callback.data.split('_')[1]
     
     if job_id not in scheduled_jobs:
@@ -214,18 +216,18 @@ async def handle_replace_video(callback: CallbackQuery):
             caption=f"❌ <b>Забраковано и удалено:</b> <code>{job_data['file_name']}</code>", 
             parse_mode="HTML"
         )
-        await callback.answer("Видео удалено. Ищу замену...")
+        await callback.answer("Гиф удалена. Ищу замену...")
         
-        success = await assign_and_notify_video(job_data['run_date'], disk)
+        success = await assign_and_notify_gif(job_data['run_date'], disk)
         if not success:
             await bot.send_message(ADMIN_ID, f"⚠️ Файлы закончились! Не удалось найти замену на слот {job_data['run_date'].strftime('%H:%M')}.")
 
 async def main():
-    scheduler.add_job(fetch_and_schedule_videos, 'cron', hour=10, minute=0)
+    scheduler.add_job(fetch_and_schedule_gifs, 'cron', hour=10, minute=0)
     scheduler.start()
     
     # Принудительный запуск для тестирования
-    asyncio.create_task(fetch_and_schedule_videos())
+    asyncio.create_task(fetch_and_schedule_gifs())
     
     logger.info("Бот начал работу.")
     await dp.start_polling(bot)
